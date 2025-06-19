@@ -1,0 +1,14 @@
+jwt-demo/
+├── backend/
+│   ├── public/
+│   │   ├── index.php
+│   │   └── .htaccess
+│   ├── src/
+│   │   ├── dependencies.php
+│   │   └── routes.php
+│   ├── .env
+│   └── composer.json
+├── frontend/
+│   └── index.html
+└── database/
+    └── schema.sql
