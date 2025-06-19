@@ -221,21 +221,72 @@ export default {
       }
     }
     
+    const validateForm = () => {
+      const errors = []
+
+      if (!form.name || form.name.trim() === '') {
+        errors.push('Name is required')
+      }
+
+      if (!form.description || form.description.trim() === '') {
+        errors.push('Description is required')
+      }
+
+      if (!form.category || form.category.trim() === '') {
+        errors.push('Category is required')
+      }
+
+      if (!form.sku || form.sku.trim() === '') {
+        errors.push('SKU is required')
+      }
+
+      if (form.quantity === null || form.quantity === undefined || form.quantity < 0) {
+        errors.push('Quantity must be 0 or greater')
+      }
+
+      if (form.price === null || form.price === undefined || form.price < 0) {
+        errors.push('Price must be 0 or greater')
+      }
+
+      return errors
+    }
+
     const handleSubmit = async () => {
       submitting.value = true
       error.value = ''
-      
+
+      // Validate form before submitting
+      const validationErrors = validateForm()
+      if (validationErrors.length > 0) {
+        error.value = validationErrors.join(', ')
+        submitting.value = false
+        return
+      }
+
       try {
-        if (isEditing.value) {
-          await inventoryAPI.update(route.params.id, form)
-        } else {
-          await inventoryAPI.create(form)
+        // Prepare clean data object
+        const submitData = {
+          name: form.name.trim(),
+          description: form.description.trim(),
+          category: form.category.trim(),
+          sku: form.sku.trim(),
+          quantity: parseInt(form.quantity) || 0,
+          price: parseFloat(form.price) || 0
         }
-        
+
+        console.log('Submitting data:', submitData)
+
+        if (isEditing.value) {
+          await inventoryAPI.update(route.params.id, submitData)
+        } else {
+          await inventoryAPI.create(submitData)
+        }
+
         router.push('/dashboard/inventory')
       } catch (err) {
         error.value = err.response?.data?.error || 'Failed to save item'
         console.error('Error saving item:', err)
+        console.error('Full error response:', err.response)
       } finally {
         submitting.value = false
       }
@@ -253,7 +304,8 @@ export default {
       submitting,
       error,
       isEditing,
-      handleSubmit
+      handleSubmit,
+      validateForm
     }
   }
 }
