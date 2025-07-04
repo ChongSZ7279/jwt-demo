@@ -2,27 +2,81 @@
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 
-// JWT Middleware
-$jwtMiddleware = function ($request, $handler) {
+// Cleanup function for expired blacklisted tokens
+function cleanupExpiredTokens($db) {
+    try {
+        $currentTimestamp = time();
+        $stmt = $db->prepare("DELETE FROM token_blacklist WHERE expires_timestamp <= ?");
+        $stmt->execute([$currentTimestamp]);
+        return $stmt->rowCount();
+    } catch (Exception $e) {
+        error_log("Token cleanup error: " . $e->getMessage());
+        return 0;
+    }
+}
+
+// JWT Middleware factory function
+function createJwtMiddleware($container) {
+    return function ($request, $handler) use ($container) {
     $token = $request->getHeaderLine('Authorization');
     $token = str_replace('Bearer ', '', $token);
-    
+
     if (empty($token)) {
         $response = new \Slim\Psr7\Response();
         $response->getBody()->write(json_encode(['error' => 'Token required']));
         return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
     }
-    
+
     try {
+        // Decode the token first to get the claims
         $decoded = JWT::decode($token, new Key($_ENV['JWT_SECRET'], 'HS256'));
+
+        // Check if token is blacklisted
+        $db = $container->get('db');
+
+            // Periodically cleanup expired tokens (10% chance on each request)
+            if (rand(1, 100) <= 10) {
+                cleanupExpiredTokens($db);
+            }
+
+            $tokenHash = hash('sha256', $token);
+
+        // Check blacklist using token hash (use UNIX timestamps for consistency)
+        $currentTimestamp = time();
+        $stmt = $db->prepare("SELECT id FROM token_blacklist WHERE token_hash = ? AND expires_timestamp > ?");
+        $stmt->execute([$tokenHash, $currentTimestamp]);
+
+        if ($stmt->fetch()) {
+            $response = new \Slim\Psr7\Response();
+            $response->getBody()->write(json_encode(['error' => 'Token has been invalidated']));
+            return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
+        }
+
+        // If we have a jti claim, also check by jti for additional security
+        if (isset($decoded->jti)) {
+            $stmt = $db->prepare("SELECT id FROM token_blacklist WHERE token_jti = ? AND expires_timestamp > ?");
+            $stmt->execute([$decoded->jti, $currentTimestamp]);
+
+            if ($stmt->fetch()) {
+                $response = new \Slim\Psr7\Response();
+                $response->getBody()->write(json_encode(['error' => 'Token has been invalidated']));
+                return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
+            }
+        }
+
         $request = $request->withAttribute('user', $decoded);
+        $request = $request->withAttribute('token', $token); // Store token for logout
         return $handler->handle($request);
     } catch (Exception $e) {
         $response = new \Slim\Psr7\Response();
-        $response->getBody()->write(json_encode(['error' => 'Invalid token']));
+        $response->getBody()->write(json_encode(['error' => 'Invalid token: ' . $e->getMessage()]));
         return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
     }
-};
+    };
+}
+
+// Create the JWT middleware instance (will be used in routes)
+$jwtMiddleware = null; // Will be set in each route that needs it
 
 // Authentication Routes
 $app->post('/login', function ($request, $response) {
@@ -35,11 +89,15 @@ $app->post('/login', function ($request, $response) {
     $user = $stmt->fetch();
 
     if ($user && ($password == $user['password'])) {
+        // Generate unique JWT ID for token tracking
+        $jti = uniqid('jwt_', true) . '_' . $user['id'] . '_' . time();
+
         $payload = [
             'sub' => $user['id'],
             'username' => $user['username'],
             'iat' => time(),
-            'exp' => time() + 3600
+            'exp' => time() + 3600,
+            'jti' => $jti  // JWT ID for token identification
         ];
         $token = JWT::encode($payload, $_ENV['JWT_SECRET'], 'HS256');
         $response->getBody()->write(json_encode(['token' => $token, 'user' => ['id' => $user['id'], 'username' => $user['username']]]));
@@ -51,17 +109,74 @@ $app->post('/login', function ($request, $response) {
 });
 
 $app->post('/logout', function ($request, $response) {
-    // In a real application, you might want to blacklist the token
-    $response->getBody()->write(json_encode(['message' => 'Logged out successfully']));
-    return $response->withHeader('Content-Type', 'application/json');
+    try {
+        // Create JWT middleware with container access
+        $jwtMiddleware = createJwtMiddleware($this);
+
+        // Use JWT middleware to validate and extract token information
+        $middlewareResult = $jwtMiddleware($request, new class {
+            public function handle($request) { return $request; }
+        });
+
+        // Check if middleware returned an error response
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult; // Return the error response from middleware
+        }
+
+        $request = $middlewareResult; // Middleware returned the modified request
+        $user = $request->getAttribute('user');
+        $token = $request->getAttribute('token');
+
+        if (!$user || !$token) {
+            $response->getBody()->write(json_encode(['error' => 'Invalid token']));
+            return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
+        }
+
+        // Add token to blacklist
+        $db = $this->get('db');
+        $tokenHash = hash('sha256', $token);
+        $jti = isset($user->jti) ? $user->jti : null;
+        $userId = $user->sub;
+        $expiresAt = gmdate('Y-m-d H:i:s', $user->exp);
+
+        // Insert into blacklist
+        $stmt = $db->prepare("
+            INSERT INTO token_blacklist (token_jti, token_hash, user_id, expires_at, expires_timestamp, reason)
+            VALUES (?, ?, ?, ?, ?, 'logout')
+            ON DUPLICATE KEY UPDATE
+                blacklisted_at = CURRENT_TIMESTAMP,
+                reason = 'logout'
+        ");
+        $stmt->execute([$jti, $tokenHash, $userId, $expiresAt, $user->exp]);
+
+        $response->getBody()->write(json_encode([
+            'message' => 'Logged out successfully',
+            'token_invalidated' => true
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
+
+    } catch (Exception $e) {
+        // If token validation fails, still return success (user is effectively logged out)
+        $response->getBody()->write(json_encode([
+            'message' => 'Logged out successfully',
+            'note' => 'Token was already invalid'
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
+    }
 });
 
 // Inventory Routes (Protected with JWT)
-$app->get('/inventory', function ($request, $response) use ($jwtMiddleware) {
+$app->get('/inventory', function ($request, $response) {
     try {
-        $request = $jwtMiddleware($request, new class {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
             public function handle($request) { return $request; }
         });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
         
         $stmt = $this->get('db')->prepare("SELECT * FROM inventory ORDER BY created_at DESC");
         $stmt->execute();
@@ -75,11 +190,17 @@ $app->get('/inventory', function ($request, $response) use ($jwtMiddleware) {
     }
 });
 
-$app->get('/inventory/{id}', function ($request, $response, $args) use ($jwtMiddleware) {
+$app->get('/inventory/{id}', function ($request, $response, $args) {
     try {
-        $request = $jwtMiddleware($request, new class {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
             public function handle($request) { return $request; }
         });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
         
         $id = $args['id'];
         $stmt = $this->get('db')->prepare("SELECT * FROM inventory WHERE id = ?");
@@ -99,11 +220,17 @@ $app->get('/inventory/{id}', function ($request, $response, $args) use ($jwtMidd
     }
 });
 
-$app->post('/inventory', function ($request, $response) use ($jwtMiddleware) {
+$app->post('/inventory', function ($request, $response) {
     try {
-        $request = $jwtMiddleware($request, new class {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
             public function handle($request) { return $request; }
         });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
         
         $data = json_decode((string)$request->getBody(), true);
         
@@ -126,11 +253,17 @@ $app->post('/inventory', function ($request, $response) use ($jwtMiddleware) {
     }
 });
 
-$app->put('/inventory/{id}', function ($request, $response, $args) use ($jwtMiddleware) {
+$app->put('/inventory/{id}', function ($request, $response, $args) {
     try {
-        $request = $jwtMiddleware($request, new class {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
             public function handle($request) { return $request; }
         });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
 
         $id = $args['id'];
         $data = json_decode((string)$request->getBody(), true);
@@ -227,11 +360,17 @@ $app->put('/inventory/{id}', function ($request, $response, $args) use ($jwtMidd
     }
 });
 
-$app->delete('/inventory/{id}', function ($request, $response, $args) use ($jwtMiddleware) {
+$app->delete('/inventory/{id}', function ($request, $response, $args) {
     try {
-        $request = $jwtMiddleware($request, new class {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
             public function handle($request) { return $request; }
         });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
         
         $id = $args['id'];
         $stmt = $this->get('db')->prepare("DELETE FROM inventory WHERE id = ?");
@@ -250,18 +389,87 @@ $app->delete('/inventory/{id}', function ($request, $response, $args) use ($jwtM
     }
 });
 
-$app->get('/inventory/search/{query}', function ($request, $response, $args) use ($jwtMiddleware) {
+$app->get('/inventory/search/{query}', function ($request, $response, $args) {
     try {
-        $request = $jwtMiddleware($request, new class {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
             public function handle($request) { return $request; }
         });
-        
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
+
         $query = '%' . $args['query'] . '%';
         $stmt = $this->get('db')->prepare("SELECT * FROM inventory WHERE name LIKE ? OR description LIKE ? OR category LIKE ? OR sku LIKE ?");
         $stmt->execute([$query, $query, $query, $query]);
         $items = $stmt->fetchAll();
-        
+
         $response->getBody()->write(json_encode($items));
+        return $response->withHeader('Content-Type', 'application/json');
+    } catch (Exception $e) {
+        $response->getBody()->write(json_encode(['error' => 'Unauthorized']));
+        return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
+    }
+});
+
+// Admin Routes for Token Management
+$app->post('/admin/cleanup-tokens', function ($request, $response) {
+    try {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
+            public function handle($request) { return $request; }
+        });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
+
+        $db = $this->get('db');
+        $deletedCount = cleanupExpiredTokens($db);
+
+        $response->getBody()->write(json_encode([
+            'message' => 'Token cleanup completed',
+            'deleted_tokens' => $deletedCount
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
+    } catch (Exception $e) {
+        $response->getBody()->write(json_encode(['error' => 'Unauthorized']));
+        return $response->withStatus(401)->withHeader('Content-Type', 'application/json');
+    }
+});
+
+$app->get('/admin/token-stats', function ($request, $response) {
+    try {
+        $jwtMiddleware = createJwtMiddleware($this);
+        $middlewareResult = $jwtMiddleware($request, new class {
+            public function handle($request) { return $request; }
+        });
+
+        if ($middlewareResult instanceof \Slim\Psr7\Response) {
+            return $middlewareResult;
+        }
+        $request = $middlewareResult;
+
+        $db = $this->get('db');
+
+        // Get blacklist statistics
+        $stmt = $db->prepare("
+            SELECT
+                COUNT(*) as total_blacklisted,
+                COUNT(CASE WHEN expires_at > NOW() THEN 1 END) as active_blacklisted,
+                COUNT(CASE WHEN expires_at <= NOW() THEN 1 END) as expired_blacklisted
+            FROM token_blacklist
+        ");
+        $stmt->execute();
+        $stats = $stmt->fetch();
+
+        $response->getBody()->write(json_encode([
+            'blacklist_stats' => $stats,
+            'cleanup_recommendation' => $stats['expired_blacklisted'] > 100 ? 'Consider running cleanup' : 'No cleanup needed'
+        ]));
         return $response->withHeader('Content-Type', 'application/json');
     } catch (Exception $e) {
         $response->getBody()->write(json_encode(['error' => 'Unauthorized']));
