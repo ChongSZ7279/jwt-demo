@@ -1,0 +1,42 @@
+{
+  "id": "jwt-demo-local",
+  "name": "JWT Demo Local",
+  "values": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "enabled": true
+    },
+    {
+      "key": "username",
+      "value": "testuser",
+      "enabled": true
+    },
+    {
+      "key": "password",
+      "value": "password",
+      "enabled": true
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "user_id",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "current_username",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "last_created_item_id",
+      "value": "",
+      "enabled": true
+    }
+  ],
+  "_postman_variable_scope": "environment"
+}

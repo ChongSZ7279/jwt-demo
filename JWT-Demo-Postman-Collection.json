@@ -1,0 +1,280 @@
+{
+  "info": {
+    "name": "JWT Demo API",
+    "description": "JWT Demo API with automatic token management",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Test if login was successful",
+                  "pm.test(\"Login successful\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "// Extract token and save to environment variable",
+                  "if (pm.response.code === 200) {",
+                  "    const responseJson = pm.response.json();",
+                  "    if (responseJson.token) {",
+                  "        pm.environment.set(\"jwt_token\", responseJson.token);",
+                  "        console.log(\"Token saved to environment:\", responseJson.token.substring(0, 50) + \"...\");",
+                  "    }",
+                  "    if (responseJson.user) {",
+                  "        pm.environment.set(\"user_id\", responseJson.user.id);",
+                  "        pm.environment.set(\"current_username\", responseJson.user.username);",
+                  "        console.log(\"User info saved:\", responseJson.user);",
+                  "    }",
+                  "} else {",
+                  "    console.log(\"Login failed:\", pm.response.text());",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/login",
+              "host": ["{{base_url}}"],
+              "path": ["login"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Test if logout was successful",
+                  "pm.test(\"Logout successful\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "// Clear token from environment",
+                  "if (pm.response.code === 200) {",
+                  "    pm.environment.unset(\"jwt_token\");",
+                  "    pm.environment.unset(\"user_id\");",
+                  "    pm.environment.unset(\"current_username\");",
+                  "    console.log(\"Token cleared from environment\");",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/logout",
+              "host": ["{{base_url}}"],
+              "path": ["logout"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Inventory",
+      "item": [
+        {
+          "name": "Get All Inventory",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "pm.test(\"Response is array\", function () {",
+                  "    const responseJson = pm.response.json();",
+                  "    pm.expect(responseJson).to.be.an('array');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory",
+              "host": ["{{base_url}}"],
+              "path": ["inventory"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Create Inventory Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test(\"Status code is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "// Save created item ID for other requests",
+                  "if (pm.response.code === 201) {",
+                  "    const responseJson = pm.response.json();",
+                  "    if (responseJson.id) {",
+                  "        pm.environment.set(\"last_created_item_id\", responseJson.id);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Item from Postman\",\n  \"description\": \"Created via Postman with auto token\",\n  \"quantity\": 10,\n  \"price\": \"29.99\",\n  \"category\": \"Test\",\n  \"sku\": \"TEST-{{$randomInt}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory",
+              "host": ["{{base_url}}"],
+              "path": ["inventory"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Inventory Item by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/{{last_created_item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "{{last_created_item_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Update Inventory Item",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Test Item\",\n  \"description\": \"Updated via Postman\",\n  \"quantity\": 15,\n  \"price\": \"39.99\",\n  \"category\": \"Updated\",\n  \"sku\": \"UPDATED-{{$randomInt}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/{{last_created_item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "{{last_created_item_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Inventory Item",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/{{last_created_item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "{{last_created_item_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Search Inventory",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{jwt_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/search/test",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "search", "test"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    }
+  ]
+}
